@@ -5,6 +5,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch import optim
@@ -34,6 +35,8 @@ class Exp_pems(Exp_Basic):
             self.input_dim = 883
         elif self.args.dataset == 'PEMS08':
             self.input_dim = 170
+        elif self.args.dataset == 'custom':
+            self.input_dim = self.args.input_dim
             
         model = SCINet(
             output_len=self.args.horizon,
@@ -56,10 +59,16 @@ class Exp_pems(Exp_Basic):
         return model
 
     def _get_data(self):
-        data_file = os.path.join('./datasets/PEMS', self.args.dataset + '.npz')
-        print('data file:',data_file)
-        data = np.load(data_file,allow_pickle=True)
-        data = data['data'][:,:,0]
+        if self.args.dataset == 'custom':
+            data_file = os.path.join('./datasets/PEMS', self.args.dataset_name + '.csv')
+            print('data file:',data_file)
+            data = pd.read_csv(data_file).values
+        else:
+            data_file = os.path.join('./datasets/PEMS', self.args.dataset + '.npz')
+            print('data file:',data_file)
+            data = np.load(data_file,allow_pickle=True)
+            data = data['data'][:,:,0]
+            
         train_ratio = self.args.train_length / (self.args.train_length + self.args.valid_length + self.args.test_length)
         valid_ratio = self.args.valid_length / (self.args.train_length + self.args.valid_length + self.args.test_length)
         test_ratio = 1 - train_ratio - valid_ratio
@@ -70,8 +79,8 @@ class Exp_pems(Exp_Basic):
             raise Exception('Cannot organize enough training data')
         if len(valid_data) == 0:
             raise Exception('Cannot organize enough validation data')
-        if len(test_data) == 0:
-            raise Exception('Cannot organize enough test data')
+        # if len(test_data) == 0:
+            # raise Exception('Cannot organize enough test data')
         if self.args.normtype == 0: # we follow StemGNN and other related works for somewhat fair comparison (orz..), but we strongly suggest use self.args.normtype==2!!!
             train_mean = np.mean(train_data, axis=0)
             train_std = np.std(train_data, axis=0)
@@ -98,14 +107,14 @@ class Exp_pems(Exp_Basic):
                                 normalize_method=self.args.norm_method, norm_statistic=train_normalize_statistic)
         valid_set = ForecastDataset(valid_data, window_size=self.args.window_size, horizon=self.args.horizon,
                                     normalize_method=self.args.norm_method, norm_statistic=val_normalize_statistic)
-        test_set = ForecastTestDataset(test_data, window_size=self.args.window_size, horizon=self.args.horizon,
-                                    normalize_method=self.args.norm_method, norm_statistic=test_normalize_statistic)
+        # test_set = ForecastTestDataset(test_data, window_size=self.args.window_size, horizon=self.args.horizon,
+                                    # normalize_method=self.args.norm_method, norm_statistic=test_normalize_statistic)
         train_loader = DataLoader(train_set, batch_size=self.args.batch_size, drop_last=False, shuffle=True,
                                             num_workers=1)
         valid_loader = DataLoader(valid_set, batch_size=self.args.batch_size, shuffle=False, num_workers=1)
-        test_loader = DataLoader(test_set, batch_size=self.args.batch_size, shuffle=False, num_workers=1)
+        # test_loader = DataLoader(test_set, batch_size=self.args.batch_size, shuffle=False, num_workers=1)
         node_cnt = train_data.shape[1]
-        return test_loader, train_loader, valid_loader,node_cnt,test_normalize_statistic,val_normalize_statistic
+        return train_loader, valid_loader,node_cnt,test_normalize_statistic,val_normalize_statistic
 
     def _select_optimizer(self):
         if self.args.optimizer == 'RMSProp':
@@ -122,8 +131,9 @@ class Exp_pems(Exp_Basic):
         self.model.eval()
         with torch.no_grad():
             for i, (inputs, target) in enumerate(dataloader):
-                inputs = inputs.cuda()
-                target = target.cuda()
+                if self.args.use_gpu:
+                    inputs = inputs.cuda()
+                    target = target.cuda()
                 input_set.append(inputs.detach().cpu().numpy())
                 step = 0
                 forecast_steps = np.zeros([inputs.size()[0], horizon, node_cnt], dtype=np.float)
@@ -243,12 +253,14 @@ class Exp_pems(Exp_Basic):
 
         return dict(mae=score[1], mape=score[0], rmse=score[2])
 
-
     def train(self):
         my_optim=self._select_optimizer()
         my_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=my_optim, gamma=self.args.decay_rate)
-        test_loader, train_loader, valid_loader,node_cnt,test_normalize_statistic,val_normalize_statistic=self._get_data()
-        forecast_loss = nn.L1Loss().cuda()
+        train_loader, valid_loader,node_cnt,test_normalize_statistic,val_normalize_statistic=self._get_data()
+        if self.args.use_gpu:
+            forecast_loss = nn.L1Loss().cuda()
+        else:
+            forecast_loss = nn.L1Loss()
         best_validate_mae = np.inf
         best_test_mae = np.inf
         validate_score_non_decrease_count = 0
@@ -270,8 +282,10 @@ class Exp_pems(Exp_Basic):
             loss_total_M = 0
             cnt = 0
             for i, (inputs, target) in enumerate(train_loader):
-                inputs = inputs.cuda()  # torch.Size([32, 12, 228])
-                target = target.cuda()  # torch.Size([32, 3, 228])
+                if self.args.use_gpu:
+                    inputs = inputs.cuda()  # torch.Size([32, 12, 228])
+                    target = target.cuda()  # torch.Size([32, 3, 228])
+                    
                 self.model.zero_grad()
                 if self.args.stacks == 1:
                     forecast = self.model(inputs)
@@ -309,19 +323,19 @@ class Exp_pems(Exp_Basic):
                 performance_metrics = self.validate(self.model, epoch, forecast_loss, valid_loader, self.args.norm_method, val_normalize_statistic,
                             node_cnt, self.args.window_size, self.args.horizon,
                             writer, result_file=None, test=False)
-                test_metrics = self.validate(self.model, epoch,  forecast_loss, test_loader, self.args.norm_method, test_normalize_statistic,
-                            node_cnt, self.args.window_size, self.args.horizon,
-                            writer, result_file=None, test=True)
+                # test_metrics = self.validate(self.model, epoch,  forecast_loss, test_loader, self.args.norm_method, test_normalize_statistic,
+                #             node_cnt, self.args.window_size, self.args.horizon,
+                #             writer, result_file=None, test=True)
                 if best_validate_mae > performance_metrics['mae']:
                     best_validate_mae = performance_metrics['mae']
                     is_best_for_now = True
                     validate_score_non_decrease_count = 0
-                    print('got best validation result:',performance_metrics, test_metrics)
+                    print('got best validation result:',performance_metrics)
                 else:
                     validate_score_non_decrease_count += 1
-                if best_test_mae > test_metrics['mae']:
-                    best_test_mae = test_metrics['mae']
-                    print('got best test result:', test_metrics)
+                if best_test_mae > performance_metrics['mae']:
+                    best_test_mae = performance_metrics['mae']
+                    print('got best test result:', performance_metrics)
                     
                 # save model
                 if is_best_for_now:

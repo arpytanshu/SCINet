@@ -105,3 +105,6 @@ class ForecastTestDataset(torch_data.Dataset):
         x_index_set = range(self.window_size, self.df_length - self.horizon + 1)
         x_end_idx = [x_index_set[j * 12] for j in range((len(x_index_set)) // 12)]
         return x_end_idx
+
+
+

@@ -5,8 +5,11 @@ import numpy as np
 class Exp_Basic(object):
     def __init__(self, args):
         self.args = args
-        # self.device = self._acquire_device()
-        self.model = self._build_model().cuda()
+        self.device = self._acquire_device()
+        if self.device.type == 'cpu':
+            self.model = self._build_model().cpu()
+        elif self.device.type == 'cuda':
+            self.model = self._build_model().cpu()
 
     def _build_model(self):
         raise NotImplementedError
